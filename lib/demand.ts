@@ -15,10 +15,13 @@ export interface DemandInputs {
   baseFee: number
   tiers: TierDefinition[]
   baseline?: BaselineAnchor | null
+  billSalience?: number
 }
 
 export interface DemandTrace {
   perConnectionUsage: number
+  usageP5?: number
+  usageP95?: number
   marginalPrice: number
   averagePrice: number
   perceivedPrice: number
@@ -35,21 +38,24 @@ export interface DemandResult {
   tiersUsed: TierDefinition[]
 }
 
-interface TierValidationResult {
+export interface TierValidationResult {
   tiers: TierDefinition[]
   isValid: boolean
   message?: string
 }
 
-const BASELINE_USAGE = 7 // kgal per connection per month
-const MIN_USAGE = 0.1
-const MAX_USAGE = 60
-const MIN_PRICE = 0.01
+export const BASELINE_USAGE = 7 // kgal per connection per month
+export const MIN_USAGE = 0.1
+export const MAX_USAGE = 60
+export const MIN_PRICE = 0.01
+export const DEFAULT_ALPHA = 0.7
+export const DEFAULT_BILL_SALIENCE = 0.05
+const FIXED_POINT_ITERATIONS = 12
 
 const roundTo = (value: number, decimals = 4) =>
   Number.isFinite(value) ? Number.parseFloat(value.toFixed(decimals)) : 0
 
-const normalizeTiers = (tiers: TierDefinition[]): TierDefinition[] => {
+export const normalizeTiers = (tiers: TierDefinition[]): TierDefinition[] => {
   return tiers
     .map((tier) => ({
       lower: Math.max(0, roundTo(tier.lower ?? 0)),
@@ -64,7 +70,7 @@ const createFallbackTier = (tiers: TierDefinition[]): TierDefinition[] => {
   return [{ lower: 0, upper: null, price: fallbackPrice }]
 }
 
-const validateTiers = (tiers: TierDefinition[]): TierValidationResult => {
+export const validateTiers = (tiers: TierDefinition[]): TierValidationResult => {
   if (tiers.length === 0) {
     return { tiers: createFallbackTier([{ lower: 0, upper: null, price: 0 }]), isValid: false, message: "Define at least one tier." }
   }
@@ -102,9 +108,9 @@ const validateTiers = (tiers: TierDefinition[]): TierValidationResult => {
   return { tiers, isValid: true }
 }
 
-const clampUsage = (value: number) => Math.min(Math.max(value, MIN_USAGE), MAX_USAGE)
+export const clampUsage = (value: number) => Math.min(Math.max(value, MIN_USAGE), MAX_USAGE)
 
-const computeMarginalPrice = (usage: number, tiers: TierDefinition[]): number => {
+export const computeMarginalPrice = (usage: number, tiers: TierDefinition[]): number => {
   for (const tier of tiers) {
     if (usage >= tier.lower && (tier.upper === null || usage < tier.upper)) {
       return tier.price
@@ -113,7 +119,7 @@ const computeMarginalPrice = (usage: number, tiers: TierDefinition[]): number =>
   return tiers[tiers.length - 1]?.price ?? 0
 }
 
-const computeVolumetricCharge = (usage: number, tiers: TierDefinition[]): number => {
+export const computeVolumetricCharge = (usage: number, tiers: TierDefinition[]): number => {
   let charge = 0
   for (const tier of tiers) {
     const upper = tier.upper ?? Number.POSITIVE_INFINITY
@@ -127,30 +133,40 @@ const computeVolumetricCharge = (usage: number, tiers: TierDefinition[]): number
   return charge
 }
 
-const computeAveragePrice = (usage: number, tiers: TierDefinition[]): number => {
+export const computeAveragePrice = (usage: number, tiers: TierDefinition[]): number => {
   if (usage <= 0) return 0
   const volumetric = computeVolumetricCharge(usage, tiers)
   return volumetric / usage
 }
 
-const computePerceivedPrice = (usage: number, tiers: TierDefinition[]): number => {
+export const computePerceivedPrice = (
+  usage: number,
+  tiers: TierDefinition[],
+  baseFee: number,
+  alpha = DEFAULT_ALPHA,
+  billSalience = 0,
+): number => {
   const marginal = computeMarginalPrice(usage, tiers)
   const average = computeAveragePrice(usage, tiers)
-  return 0.5 * (marginal + average)
+  const blended = alpha * marginal + (1 - alpha) * average
+  const baseImpact = billSalience * (baseFee / Math.max(usage, MIN_USAGE))
+  return blended + baseImpact
 }
 
-const solveUsage = (
+export const solveUsage = (
   elasticity: number,
   tiers: TierDefinition[],
   baselineUsage: number,
   baselinePrice: number,
+  baseFee: number,
+  billSalience: number,
 ): { usage: number; marginalPrice: number; averagePrice: number; perceivedPrice: number } => {
   const baselineUsageClamped = clampUsage(baselineUsage)
   const referencePrice = Math.max(MIN_PRICE, baselinePrice)
   let usage = baselineUsageClamped
 
-  for (let i = 0; i < 25; i++) {
-    const perceivedPrice = Math.max(MIN_PRICE, computePerceivedPrice(usage, tiers))
+  for (let i = 0; i < FIXED_POINT_ITERATIONS; i++) {
+    const perceivedPrice = Math.max(MIN_PRICE, computePerceivedPrice(usage, tiers, baseFee, DEFAULT_ALPHA, billSalience))
     const nextUsage = clampUsage(baselineUsageClamped * Math.pow(perceivedPrice / referencePrice, elasticity))
     if (Math.abs(nextUsage - usage) < 0.0005) {
       usage = nextUsage
@@ -161,7 +177,7 @@ const solveUsage = (
 
   const marginalPrice = computeMarginalPrice(usage, tiers)
   const averagePrice = computeAveragePrice(usage, tiers)
-  const perceivedPrice = computePerceivedPrice(usage, tiers)
+  const perceivedPrice = computePerceivedPrice(usage, tiers, baseFee, DEFAULT_ALPHA, billSalience)
 
   return { usage, marginalPrice, averagePrice, perceivedPrice }
 }
@@ -174,19 +190,23 @@ export const calculateDemand = (inputs: DemandInputs): DemandResult => {
   const elasticity = Number.isFinite(inputs.elasticity) ? inputs.elasticity : -0.2
   const baseFee = Math.max(0, inputs.baseFee || 0)
   const connections = Math.max(0, inputs.connections || 0)
+  const billSalience = inputs.billSalience ?? DEFAULT_BILL_SALIENCE
   const baselineUsage = clampUsage(inputs.baseline?.usage ?? BASELINE_USAGE)
   const baselinePerceivedPrice = Math.max(
     MIN_PRICE,
-    inputs.baseline?.perceivedPrice ?? computePerceivedPrice(baselineUsage, tiers),
+    inputs.baseline?.perceivedPrice ?? computePerceivedPrice(baselineUsage, tiers, baseFee, DEFAULT_ALPHA, billSalience),
   )
 
-  const usageSolution = solveUsage(elasticity, tiers, baselineUsage, baselinePerceivedPrice)
+  const usageSolution = solveUsage(elasticity, tiers, baselineUsage, baselinePerceivedPrice, baseFee, billSalience)
   const volumetricBillPerConnection = computeVolumetricCharge(usageSolution.usage, tiers)
   const billPerConnection = baseFee + volumetricBillPerConnection
   const usageMG = (connections * usageSolution.usage) / 1000
   const revenue = billPerConnection * connections
 
   const warnings: string[] = []
+  if (elasticity >= 0) {
+    warnings.push("Elasticity should be negative (e.g., −0.10 to −0.30).")
+  }
   if (usageSolution.usage <= MIN_USAGE + 1e-3) {
     warnings.push("Usage settled at the minimum bound. Check elasticity or price inputs.")
   } else if (usageSolution.usage >= MAX_USAGE - 1e-3) {
@@ -199,6 +219,8 @@ export const calculateDemand = (inputs: DemandInputs): DemandResult => {
     volumetricBillPerConnection,
     trace: {
       perConnectionUsage: usageSolution.usage,
+      usageP5: usageSolution.usage,
+      usageP95: usageSolution.usage,
       marginalPrice: usageSolution.marginalPrice,
       averagePrice: usageSolution.averagePrice,
       perceivedPrice: usageSolution.perceivedPrice,

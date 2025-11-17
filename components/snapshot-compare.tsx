@@ -84,22 +84,39 @@ export default function SnapshotCompare({ currentMG, currentRevenue }: SnapshotC
     }).format(value)
   }
 
-  const chartData = snapshots.slice(-5).map((s, idx) => ({
-    label: `v${snapshots.length - 5 + idx + 1}`,
-    mg: Number(s.mg.toFixed(2)),
-    revenue: Number(s.revenue.toFixed(0)),
-  }))
-
-  const getPreviousValue = (metric: 'mg' | 'revenue'): number | null => {
-    if (snapshots.length === 0) return null
-    const previousSnapshot = snapshots[snapshots.length - 1]
-    return metric === 'mg' ? previousSnapshot.mg : previousSnapshot.revenue
-  }
-
   const calculatePercentDifference = (current: number, previous: number | null): number | null => {
     if (previous === null || previous === 0) return null
     return ((current - previous) / previous) * 100
   }
+
+  const formatTooltipWithChange = (
+    value: number,
+    metric: "mg" | "revenue",
+    payload?: Record<string, any>,
+  ): string => {
+    const baseString = metric === "mg" ? `${value.toFixed(2)} MG` : formatCurrency(value)
+    const percent = metric === "mg" ? payload?.mgChangePercent : payload?.revenueChangePercent
+
+    if (percent === null || percent === undefined) {
+      return baseString
+    }
+
+    const sign = percent > 0 ? "+" : ""
+    return `${baseString} (${sign}${percent.toFixed(1)}%)`
+  }
+
+  const chartStartIndex = Math.max(0, snapshots.length - 5)
+  const chartData = snapshots.slice(chartStartIndex).map((s, idx) => {
+    const absoluteIndex = chartStartIndex + idx
+    const previousSnapshot = absoluteIndex > 0 ? snapshots[absoluteIndex - 1] : null
+    return {
+      label: `v${absoluteIndex + 1}`,
+      mg: Number(s.mg.toFixed(2)),
+      revenue: Number(s.revenue.toFixed(0)),
+      mgChangePercent: previousSnapshot ? calculatePercentDifference(s.mg, previousSnapshot.mg) : null,
+      revenueChangePercent: previousSnapshot ? calculatePercentDifference(s.revenue, previousSnapshot.revenue) : null,
+    }
+  })
 
   const previousMG = snapshots.length > 1 ? snapshots[snapshots.length - 2].mg : null
   const previousRevenue = snapshots.length > 1 ? snapshots[snapshots.length - 2].revenue : null
@@ -174,7 +191,9 @@ export default function SnapshotCompare({ currentMG, currentRevenue }: SnapshotC
                 <Tooltip
                   contentStyle={{ backgroundColor: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "6px" }}
                   labelStyle={{ color: "#0f172a" }}
-                  formatter={(value) => `${Number(value).toFixed(2)} MG`}
+                  formatter={(value, _name, props) =>
+                    formatTooltipWithChange(Number(value), "mg", props?.payload)
+                  }
                 />
                 <Bar
                   dataKey="mg"
@@ -210,7 +229,9 @@ export default function SnapshotCompare({ currentMG, currentRevenue }: SnapshotC
                 <Tooltip
                   contentStyle={{ backgroundColor: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: "6px" }}
                   labelStyle={{ color: "#0f172a" }}
-                  formatter={(value) => formatCurrency(Number(value))}
+                  formatter={(value, _name, props) =>
+                    formatTooltipWithChange(Number(value), "revenue", props?.payload)
+                  }
                 />
                 <Bar
                   dataKey="revenue"
