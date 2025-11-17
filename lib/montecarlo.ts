@@ -72,13 +72,23 @@ const percentile = (sortedValues: number[], p: number) => {
 
 const clampElasticity = (value: number) => Math.min(Math.max(value, ELASTICITY_MIN), ELASTICITY_MAX)
 
-const buildUsageDraws = (anchorUsage: number, usageVar: number, seeds: number[]) => {
+export const buildUsageDraws = (anchorUsage: number, usageVar: number, seeds: number[]) => {
   const sigma = Math.max(0.01, usageVar)
   const mu = Math.log(Math.max(anchorUsage, MIN_USAGE)) - 0.5 * sigma * sigma
   return seeds.map((z) => clampUsage(Math.exp(mu + sigma * z)))
 }
 
-export const runMonteCarloSimulation = (params: MonteCarloParams): DemandResult => {
+export interface MonteCarloSamples {
+  baseline: number[]
+  proposal: number[]
+  eps: number[]
+}
+
+export interface MonteCarloResult extends DemandResult {
+  samples: MonteCarloSamples
+}
+
+export const runMonteCarloSimulation = (params: MonteCarloParams): MonteCarloResult => {
   const sampleCount = Math.min(params.draws.q0.length, params.draws.eps.length)
   if (sampleCount === 0) {
     return {
@@ -97,17 +107,24 @@ export const runMonteCarloSimulation = (params: MonteCarloParams): DemandResult 
       warnings: ["Baseline has not been established yet."],
       validationMessage: params.validationMessage,
       tiersUsed: params.tiers,
+      samples: {
+        baseline: [],
+        proposal: [],
+        eps: [],
+      },
     }
   }
 
   const baselineUsages = buildUsageDraws(params.anchor.usage, params.usageVar, params.draws.q0)
   const usageSamples: number[] = []
   const billSamples: number[] = []
+  const epsSamples: number[] = []
   let usageSum = 0
   let billSum = 0
 
   for (let i = 0; i < sampleCount; i++) {
     const elasticity = clampElasticity(params.elasticityMean + ELASTICITY_STD * params.draws.eps[i])
+    epsSamples.push(elasticity)
     const usageSolution = solveUsage(
       elasticity,
       params.tiers,
@@ -166,6 +183,11 @@ export const runMonteCarloSimulation = (params: MonteCarloParams): DemandResult 
     warnings,
     validationMessage: params.validationMessage,
     tiersUsed: params.tiers,
+    samples: {
+      baseline: baselineUsages,
+      proposal: usageSamples,
+      eps: epsSamples,
+    },
   }
 }
 

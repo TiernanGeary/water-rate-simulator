@@ -8,12 +8,22 @@ import SnapshotCompare from "./snapshot-compare"
 import {
   type TierDefinition,
   type BaselineAnchor,
+  type DemandResult,
   calculateDemand,
   computePerceivedPrice,
   normalizeTiers,
   validateTiers,
 } from "@/lib/demand"
-import { generateMonteCarloDraws, runMonteCarloSimulation, type MonteCarloDraws } from "@/lib/montecarlo"
+import {
+  generateMonteCarloDraws,
+  runMonteCarloSimulation,
+  type MonteCarloDraws,
+  type MonteCarloResult,
+} from "@/lib/montecarlo"
+import UsageHistogram from "@/components/analytics/UsageHistogram"
+import TierOccupancyBars from "@/components/analytics/TierOccupancyBars"
+import DecileWaterfall from "@/components/analytics/DecileWaterfall"
+import ElasticityBeeswarm from "@/components/analytics/ElasticityBeeswarm"
 import { SNAPSHOT_CAPTURE_EVENT } from "@/lib/events"
 
 interface Tier extends TierDefinition {
@@ -27,6 +37,8 @@ const BILL_SALIENCE_MIN = 0
 const BILL_SALIENCE_MAX = 0.2
 
 const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max)
+
+type DemandComputation = DemandResult & { samples?: MonteCarloResult["samples"] }
 
 export default function WaterRateSimulator() {
   const [connections, setConnections] = useState<number>(1000)
@@ -50,7 +62,7 @@ export default function WaterRateSimulator() {
   const structuralValidationMessage = tierValidation.isValid ? "" : tierValidation.message ?? ""
   const effectiveTypicalUse = Math.max(typicalUse, TYPICAL_USE_MIN)
 
-  const demandResult = useMemo(() => {
+  const demandResult = useMemo<DemandComputation>(() => {
     if (anchor && draws) {
       return runMonteCarloSimulation({
         connections,
@@ -72,7 +84,7 @@ export default function WaterRateSimulator() {
       undefined,
       billSalience,
     )
-    return calculateDemand({
+    const fallback = calculateDemand({
       connections,
       elasticity,
       baseFee,
@@ -80,6 +92,7 @@ export default function WaterRateSimulator() {
       billSalience,
       baseline: { usage: effectiveTypicalUse, perceivedPrice },
     })
+    return { ...fallback, samples: undefined }
   }, [
     anchor,
     baseFee,
@@ -98,6 +111,11 @@ export default function WaterRateSimulator() {
 
   const combinedValidationMessage =
     validationMessage || structuralValidationMessage || demandResult.validationMessage || ""
+
+  const baselineUsageSamples = demandResult.samples?.baseline ?? []
+  const proposalUsageSamples = demandResult.samples?.proposal ?? []
+  const elasticitySamples = demandResult.samples?.eps ?? []
+  const analyticsReady = Boolean(anchor && draws && demandResult.samples)
 
   const freezeBaseline = useCallback(
     (force = false) => {
@@ -448,6 +466,28 @@ export default function WaterRateSimulator() {
                       ))}
                     </ul>
                   </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card className="bg-white border-slate-200 shadow-sm">
+              <CardHeader>
+                <CardTitle className="text-slate-900">Customer Analytics</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {analyticsReady ? (
+                  <div className="space-y-6">
+                    <UsageHistogram q0={baselineUsageSamples} tiers={safeTiers} />
+                    <TierOccupancyBars
+                      tiers={safeTiers}
+                      qBaseline={baselineUsageSamples}
+                      qProposal={proposalUsageSamples}
+                    />
+                    <DecileWaterfall q0={baselineUsageSamples} q1={proposalUsageSamples} N={connections} />
+                    <ElasticityBeeswarm eps={elasticitySamples} center={elasticity} />
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-500">Set Baseline to enable customer analytics.</p>
                 )}
               </CardContent>
             </Card>

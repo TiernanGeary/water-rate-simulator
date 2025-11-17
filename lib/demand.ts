@@ -4,6 +4,8 @@ export interface TierDefinition {
   price: number
 }
 
+export type Tier = TierDefinition
+
 export interface BaselineAnchor {
   usage: number
   perceivedPrice: number
